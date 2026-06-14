@@ -1,0 +1,192 @@
+"""User routes.
+
+This module defines API routes for user management and authentication.
+"""
+
+import os
+from typing import Annotated, cast
+from urllib.parse import urlencode
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
+
+from app.core.auth import create_access_token
+from app.core.database import get_db
+from app.core.dependencies import get_current_user, get_current_user_oauth_token
+from app.core.google_auth import (
+    get_auth_url,
+    get_google_email,
+    handle_oauth_callback,
+)
+from app.core.settings import settings
+from app.models.user import User
+from app.schemas.user import RedirectResponseSchema, Token, UserCreate, UserUpdate
+from app.schemas.user import User as UserSchema
+from app.services.auth_token import AuthTokenService
+from app.services.user import UserService
+
+api_router = APIRouter(
+    prefix="/user",
+    tags=["User"],
+)
+
+
+@api_router.post("/register", status_code=status.HTTP_200_OK)
+def register(
+    user: UserCreate,
+    db: Annotated[Session, Depends(get_db)],
+) -> RedirectResponseSchema:
+    """
+    Register a new user and initiate Google OAuth2 flow.
+    Args:
+        user: User creation data
+        db: Database session
+    """
+    UserService.create(db=db, user=user)
+    auth_url, _ = get_auth_url()
+    return RedirectResponseSchema(redirect_url=auth_url)
+
+
+@api_router.get("/auth/google/callback")
+def auth_google_callback(
+    code: str,
+    db: Annotated[Session, Depends(get_db)],
+) -> RedirectResponse:
+    """
+    Handle Google OAuth2 callback and redirect to frontend with tokens.
+
+    Args:
+        code: OAuth2 authorization code from Google
+        db: Database session
+
+    Returns:
+        RedirectResponse: Redirects to frontend signup page with an application JWT
+    """
+    creds = handle_oauth_callback(code)
+    email = get_google_email(creds["access_token"])
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to retrieve email from Google.",
+        )
+    try:
+        user = UserService.get_user_by_email(db, email)
+    except HTTPException:
+        user = None
+
+    if user:
+        uid = cast("int", user.id)
+        creds["email"] = email
+        AuthTokenService.create_auth_token(db, uid, creds)
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found. Please register first.",
+        )
+
+    jwt_token = create_access_token(data={"sub": user.email})
+    token_type = os.environ.get("TOKEN_TYPE", "bearer")
+
+    redirect_params = {
+        "email": email,
+        "jwt_token": jwt_token,
+        "token_type": token_type,
+    }
+    redirect_url = f"{settings.frontend_url}/signup?{urlencode(redirect_params)}"
+    return RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
+
+
+@api_router.post("/login")
+def login(
+    form_data: Annotated[OAuth2PasswordRequestForm, Depends()],
+    db: Annotated[Session, Depends(get_db)],
+) -> Token:
+    """
+    Login and get access token.
+
+    Args:
+        form_data: OAuth2 login form (username=email, password)
+        db: Database session
+
+    Returns:
+        Token: Access token
+
+    Raises:
+        HTTPException: If credentials are invalid
+    """
+    user = UserService.authenticate(
+        db,
+        email=form_data.username,
+        password=form_data.password,
+    )
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    access_token = create_access_token(data={"sub": user.email})
+    token_type = os.environ.get("TOKEN_TYPE", "bearer")
+
+    return Token(
+        access_token=access_token,
+        token_type=token_type,
+    )
+
+
+@api_router.get("/me", response_model=UserSchema)
+def read_users_me(
+    current_user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """
+    Get current user profile.
+
+    Args:
+        current_user: Current authenticated user
+
+    Returns:
+        User: Current user data
+        AuthToken: Current user's auth token data
+    """
+    return current_user
+
+
+@api_router.put("/me", response_model=UserSchema)
+def update_user_profile(
+    user_update: UserUpdate,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> User:
+    """
+    Update current user's profile.
+
+    Args:
+        user_update: User update data
+        current_user: Current authenticated user
+        db: Database session
+
+    Returns:
+        User: Updated user data
+    """
+    if user_update.first_name is not None and user_update.last_name is not None:
+        return UserService.update_user_name(db, current_user.id, user_update.first_name, user_update.last_name)  # type: ignore[arg-type]
+    return current_user
+
+
+@api_router.get("/token")
+def get_google_token(
+    token: Annotated[object, Depends(get_current_user_oauth_token)],
+) -> dict[str, str | bool]:
+    """
+    Report whether the current user has connected Google Drive.
+
+    Raw Google OAuth tokens are intentionally not returned to the browser.
+    """
+    email = getattr(token, "email", "")
+    return {
+        "connected": True,
+        "email": email,
+    }

@@ -1,0 +1,963 @@
+"use client";
+
+import { useState, useMemo, useEffect } from "react";
+import { ArrowLeft, Search, Send, FileText, Trash2, Plus } from "lucide-react";
+import { useDarkMode } from "@/contexts/DarkModeContext";
+import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
+import {
+  createFile,
+  getCourseById,
+  getFilesForCourse,
+  getStoredAccessToken,
+  clearAuthTokens,
+  ApiError,
+  searchDrive,
+  getTutorSessionsByCourse,
+  createTutorSession,
+  getTutorSessionMessages,
+  sendMessage,
+  updateCourse,
+  deleteCourse,
+  deleteFile,
+} from "@/lib/api";
+
+interface Document {
+  id: string;
+  name: string;
+  uploadedAt: string;
+}
+
+interface ChatMessage {
+  id: string;
+  sender: "user" | "assistant";
+  content: string;
+  timestamp: string;
+}
+
+interface DriveResult {
+  id: string;
+  name: string;
+  modifiedTime?: string;
+}
+
+const escapeHtml = (text: string) =>
+  text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+
+const applyInlineMarkdown = (text: string) => {
+  let result = text;
+  result = result.replace(/`([^`]+)`/g, "<code>$1</code>");
+  result = result.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  result = result.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  return result;
+};
+
+const markdownToHtml = (raw: string) => {
+  const lines = escapeHtml(raw).split(/\r?\n/);
+  const htmlParts: string[] = [];
+  let inList = false;
+
+  const closeList = () => {
+    if (inList) {
+      htmlParts.push("</ul>");
+      inList = false;
+    }
+  };
+
+  lines.forEach((line) => {
+    if (/^###\s+/.test(line)) {
+      closeList();
+      htmlParts.push(
+        `<h3>${applyInlineMarkdown(line.replace(/^###\s+/, ""))}</h3>`
+      );
+    } else if (/^##\s+/.test(line)) {
+      closeList();
+      htmlParts.push(
+        `<h2>${applyInlineMarkdown(line.replace(/^##\s+/, ""))}</h2>`
+      );
+    } else if (/^#\s+/.test(line)) {
+      closeList();
+      htmlParts.push(
+        `<h1>${applyInlineMarkdown(line.replace(/^#\s+/, ""))}</h1>`
+      );
+    } else if (/^```/.test(line)) {
+      closeList();
+      const codeLines: string[] = [];
+      let i = lines.indexOf(line) + 1;
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      htmlParts.push(`<pre><code>${codeLines.join("\n")}</code></pre>`);
+      lines.splice(lines.indexOf(line), i - lines.indexOf(line) + 1);
+    } else if (/^\-\s+/.test(line)) {
+      if (!inList) {
+        inList = true;
+        htmlParts.push("<ul>");
+      }
+      htmlParts.push(
+        `<li>${applyInlineMarkdown(line.replace(/^\-\s+/, ""))}</li>`
+      );
+    } else if (line.trim() === "") {
+      closeList();
+      htmlParts.push("<br />");
+    } else {
+      closeList();
+      htmlParts.push(`<p>${applyInlineMarkdown(line)}</p>`);
+    }
+  });
+
+  closeList();
+  return htmlParts.join("");
+};
+
+export default function ClassDetailPage() {
+  const params = useParams<{ id: string }>();
+  const router = useRouter();
+  const { isDark } = useDarkMode();
+  const courseId = Number(params.id);
+  const [activeTab, setActiveTab] = useState<"docs" | "chat" | "settings">(
+    "docs"
+  );
+  const [searchQuery, setSearchQuery] = useState("");
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [tutorSessions, setTutorSessions] = useState<
+    { id: number; title: string | null }[]
+  >([]);
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(true);
+  const [isSending, setIsSending] = useState(false);
+  const [isWaitingForAi, setIsWaitingForAi] = useState(false);
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [courseName, setCourseName] = useState<string>("Loading...");
+  const [courseNameInput, setCourseNameInput] = useState<string>("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [driveResults, setDriveResults] = useState<DriveResult[]>([]);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      if (!params.id) return;
+      const token = getStoredAccessToken();
+      if (!token) {
+        router.push("/login");
+        return;
+      }
+
+      try {
+        setIsLoading(true);
+        setError(null);
+        const [course, files] = await Promise.all([
+          getCourseById(courseId),
+          getFilesForCourse(courseId),
+        ]);
+
+        const sessions = await getTutorSessionsByCourse(courseId);
+        setTutorSessions(sessions.map((s) => ({ id: s.id, title: s.title })));
+        if (sessions.length > 0) {
+          setActiveSessionId(sessions[0].id);
+          const sessionMessages = await getTutorSessionMessages(sessions[0].id);
+          setMessages(
+            sessionMessages.map((m) => ({
+              id: m.id.toString(),
+              sender: m.role,
+              content: m.message,
+              timestamp: new Date(m.created_at).toLocaleString(),
+            }))
+          );
+        }
+
+        setIsLoadingSessions(false);
+
+        setCourseName(course.name);
+        setCourseNameInput(course.name);
+        setDocuments(
+          files.map((file) => ({
+            id: file.id.toString(),
+            name: file.name,
+            uploadedAt: new Date(file.created_at).toLocaleString(),
+          }))
+        );
+        if (sessions.length === 0) {
+          setMessages([
+            {
+              id: "welcome",
+              sender: "assistant",
+              content:
+                "Hello! I'm your AI tutor for this class. Create a session to start chatting.",
+              timestamp: new Date().toLocaleString(),
+            },
+          ]);
+        }
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to load class";
+        setError(message);
+        if (err instanceof ApiError && err.status === 401) {
+          clearAuthTokens();
+          router.push("/login");
+          return;
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchData();
+  }, [courseId, params.id, router]);
+
+  const displayedDocuments = useMemo(() => documents, [documents]);
+
+  const handleSearchDrive = async () => {
+    try {
+      setIsSearching(true);
+      setError(null);
+      const results = await searchDrive(searchQuery.trim() || undefined);
+      setDriveResults(
+        results.map((item) => ({
+          id: item.id,
+          name: item.name,
+          modifiedTime: item.modifiedTime,
+        }))
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to search Drive";
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthTokens();
+        router.push("/login");
+        return;
+      }
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleAddFile = async (driveFile: DriveResult) => {
+    try {
+      setError(null);
+      await createFile({
+        name: driveFile.name,
+        google_drive_id: driveFile.id,
+        course_id: courseId,
+      });
+      const files = await getFilesForCourse(courseId);
+      setDocuments(
+        files.map((f) => ({
+          id: f.id.toString(),
+          name: f.name,
+          uploadedAt: new Date(f.created_at).toLocaleString(),
+        }))
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to add file";
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthTokens();
+        router.push("/login");
+        return;
+      }
+    }
+  };
+
+  const handleDeleteDocument = async (documentId: string) => {
+    try {
+      setError(null);
+      const fileId = parseInt(documentId, 10);
+      await deleteFile(fileId);
+      const files = await getFilesForCourse(courseId);
+      setDocuments(
+        files.map((f) => ({
+          id: f.id.toString(),
+          name: f.name,
+          uploadedAt: new Date(f.created_at).toLocaleString(),
+        }))
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to delete file";
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthTokens();
+        router.push("/login");
+        return;
+      }
+    }
+  };
+
+  const handleUpdateCourse = async () => {
+    if (!courseNameInput.trim()) {
+      setError("Course name cannot be empty");
+      return;
+    }
+    try {
+      setError(null);
+      const updated = await updateCourse(courseId, {
+        name: courseNameInput.trim(),
+      });
+      setCourseName(updated.name);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to update course";
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthTokens();
+        router.push("/login");
+        return;
+      }
+    }
+  };
+
+  const handleDeleteCourse = async () => {
+    if (
+      !confirm(
+        "Are you sure you want to delete this course? This cannot be undone."
+      )
+    ) {
+      return;
+    }
+    try {
+      setError(null);
+      await deleteCourse(courseId);
+      router.push("/dashboard");
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to delete course";
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthTokens();
+        router.push("/login");
+        return;
+      }
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !activeSessionId) return;
+    const optimistic: ChatMessage = {
+      id: Date.now().toString(),
+      sender: "user",
+      content: chatInput,
+      timestamp: new Date().toLocaleString(),
+    };
+    setMessages([...messages, optimistic]);
+    setChatInput("");
+
+    try {
+      setIsSending(true);
+      setIsWaitingForAi(true);
+      await sendMessage({
+        tutor_session_id: activeSessionId,
+        message: chatInput,
+      });
+      const refreshedMessages = await getTutorSessionMessages(activeSessionId);
+      setMessages(
+        refreshedMessages.map((m) => ({
+          id: m.id.toString(),
+          sender: m.role,
+          content: m.message,
+          timestamp: new Date(m.created_at).toLocaleString(),
+        }))
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to send message";
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthTokens();
+        router.push("/login");
+        return;
+      }
+    } finally {
+      setIsSending(false);
+      setIsWaitingForAi(false);
+    }
+  };
+
+  const handleSelectSession = async (sessionId: number) => {
+    setActiveSessionId(sessionId);
+    try {
+      setIsLoadingSessions(true);
+      const sessionMessages = await getTutorSessionMessages(sessionId);
+      setMessages(
+        sessionMessages.map((m) => ({
+          id: m.id.toString(),
+          sender: m.role,
+          content: m.message,
+          timestamp: new Date(m.created_at).toLocaleString(),
+        }))
+      );
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to load session";
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthTokens();
+        router.push("/login");
+        return;
+      }
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  };
+
+  const handleCreateSession = async () => {
+    try {
+      setIsLoadingSessions(true);
+      const title = new Date().toLocaleString();
+      const session = await createTutorSession({ course_id: courseId, title });
+      setTutorSessions([
+        { id: session.id, title: session.title },
+        ...tutorSessions,
+      ]);
+      setActiveSessionId(session.id);
+      setMessages([]);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to create session";
+      setError(message);
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthTokens();
+        router.push("/login");
+        return;
+      }
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  };
+
+  return (
+    <div className={`flex h-screen ${
+      isDark ? "bg-gray-800" : "bg-gray-50"
+    }`}>
+      <div className="flex-1 flex flex-col overflow-hidden">
+        <div className={`border-b px-8 py-6 ${
+          isDark
+            ? "bg-gray-700 border-gray-600"
+            : "bg-white border-gray-200"
+        }`}>
+          <div className="flex items-center gap-4 mb-6">
+            <Link href="/dashboard">
+              <button className={`p-2 rounded-lg transition-colors ${
+                isDark ? "hover:bg-gray-600" : "hover:bg-gray-100"
+              }`}>
+                <ArrowLeft className={`w-5 h-5 ${
+                  isDark ? "text-gray-300" : "text-gray-600"
+                }`} />
+              </button>
+            </Link>
+            <div>
+              <h1 className={`text-2xl font-bold ${
+                isDark ? "text-white" : "text-gray-900"
+              }`}>
+                {courseName}
+              </h1>
+              <p className={`text-sm ${
+                isDark ? "text-gray-400" : "text-gray-500"
+              }`}>
+                Class ID: {params.id}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <div className="flex gap-8">
+              <button
+                onClick={() => setActiveTab("docs")}
+                className={`pb-3 border-b-2 transition-colors ${
+                  activeTab === "docs"
+                    ? isDark
+                      ? "border-blue-500 text-blue-400 font-medium"
+                      : "border-gray-900 text-gray-900 font-medium"
+                    : isDark
+                    ? "border-transparent text-gray-400 hover:text-gray-200"
+                    : "border-transparent text-gray-500 hover:text-gray-900"
+                }`}
+              >
+                Docs
+              </button>
+              <button
+                onClick={() => setActiveTab("chat")}
+                className={`pb-3 border-b-2 transition-colors ${
+                  activeTab === "chat"
+                    ? isDark
+                      ? "border-blue-500 text-blue-400 font-medium"
+                      : "border-gray-900 text-gray-900 font-medium"
+                    : isDark
+                    ? "border-transparent text-gray-400 hover:text-gray-200"
+                    : "border-transparent text-gray-500 hover:text-gray-900"
+                }`}
+              >
+                Chat
+              </button>
+              <button
+                onClick={() => setActiveTab("settings")}
+                className={`pb-3 border-b-2 transition-colors ${
+                  activeTab === "settings"
+                    ? isDark
+                      ? "border-blue-500 text-blue-400 font-medium"
+                      : "border-gray-900 text-gray-900 font-medium"
+                    : isDark
+                    ? "border-transparent text-gray-400 hover:text-gray-200"
+                    : "border-transparent text-gray-500 hover:text-gray-900"
+                }`}
+              >
+                Settings
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {error && (
+          <div className={`mx-8 mt-4 rounded-md border px-4 py-3 text-sm ${
+            isDark
+              ? "border-red-600 bg-red-900/30 text-red-300"
+              : "border-red-200 bg-red-50 text-red-700"
+          }`}>
+            {error}
+          </div>
+        )}
+
+        {activeTab === "docs" && (
+          <div className="flex-1 overflow-auto px-8 py-6 flex flex-col">
+            {isLoading ? (
+              <div className={`flex-1 flex items-center justify-center ${
+                isDark ? "text-gray-400" : "text-gray-500"
+              }`}>
+                Loading files...
+              </div>
+            ) : (
+              <>
+                <h2 className={`text-lg font-semibold mb-4 ${
+                  isDark ? "text-white" : "text-gray-900"
+                }`}>
+                  Documents Added
+                </h2>
+
+                <div className="space-y-3 mb-8">
+                  {displayedDocuments.length > 0 ? (
+                    displayedDocuments.map((doc) => (
+                      <div
+                        key={doc.id}
+                        className={`flex items-center justify-between p-4 border rounded-lg hover:shadow transition-shadow ${
+                          isDark
+                            ? "bg-gray-700 border-gray-600"
+                            : "bg-white border-gray-300"
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <FileText
+                            className={`w-5 h-5 ${
+                              isDark ? "text-gray-400" : "text-gray-400"
+                            }`}
+                          />
+                          <div>
+                            <p className={`text-sm font-medium ${
+                              isDark ? "text-white" : "text-gray-900"
+                            }`}>
+                              {doc.name}
+                            </p>
+                            <p
+                              className={`text-xs ${
+                                isDark ? "text-gray-400" : "text-gray-500"
+                              }`}
+                            >
+                              Uploaded {doc.uploadedAt}
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleDeleteDocument(doc.id)}
+                          className={`p-2 rounded-lg transition-colors ${
+                            isDark ? "hover:bg-red-900/30" : "hover:bg-red-100"
+                          }`}
+                          aria-label="Delete"
+                          title="Delete document"
+                        >
+                          <Trash2
+                            className={`w-4 h-4 ${
+                              isDark ? "text-red-400" : "text-red-600"
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                      <FileText className={`w-12 h-12 mb-3 ${
+                        isDark ? "text-gray-600" : "text-gray-300"
+                      }`} />
+                      <p className={isDark ? "text-gray-400" : "text-gray-500"}>
+                        No documents found
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="mb-4">
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <Search
+                        className={`w-5 h-5 ${
+                          isDark ? "text-gray-400" : "text-gray-400"
+                        }`}
+                      />
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Search your Google Drive..."
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className={`w-full pl-10 pr-28 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                        isDark
+                          ? "border-gray-600 bg-gray-700 text-white placeholder-gray-400"
+                          : "border-gray-300"
+                      }`}
+                    />
+                    <button
+                      onClick={handleSearchDrive}
+                      className={`absolute inset-y-0 right-0 flex items-center gap-2 pr-3 text-sm ${
+                        isDark
+                          ? "text-gray-300 hover:text-white"
+                          : "text-gray-700 hover:text-gray-900"
+                      }`}
+                      disabled={isSearching}
+                    >
+                      <Search className="w-4 h-4" />
+                      {isSearching ? "Searching..." : "Search"}
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <h3 className={`text-sm font-semibold mb-2 ${
+                    isDark ? "text-gray-300" : "text-gray-700"
+                  }`}>
+                    Google Drive results
+                  </h3>
+                  {driveResults.length === 0 ? (
+                    <p className={isDark ? "text-gray-400" : "text-gray-500"}>
+                      Use the search button above to find files in your Drive.
+                    </p>
+                  ) : (
+                    <div className="space-y-3">
+                      {driveResults.map((file) => (
+                        <div
+                          key={file.id}
+                          className={`flex items-center justify-between p-4 border rounded-lg hover:shadow transition-shadow ${
+                            isDark
+                              ? "bg-gray-700 border-gray-600"
+                              : "bg-white border-gray-300"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <FileText
+                              className={`w-5 h-5 ${
+                                isDark ? "text-gray-400" : "text-gray-400"
+                              }`}
+                            />
+                            <div>
+                              <p className={`text-sm font-medium ${
+                                isDark ? "text-white" : "text-gray-900"
+                              }`}>
+                                {file.name}
+                              </p>
+                              {file.modifiedTime && (
+                                <p
+                                  className={`text-xs ${
+                                    isDark ? "text-gray-400" : "text-gray-500"
+                                  }`}
+                                >
+                                  Modified{" "}
+                                  {new Date(file.modifiedTime).toLocaleString()}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleAddFile(file)}
+                            className={`flex items-center gap-1 px-3 py-1.5 border rounded-lg text-sm transition-colors ${
+                              isDark
+                                ? "border-gray-600 text-gray-300 hover:bg-gray-600"
+                                : "border-gray-300 text-gray-800 hover:bg-gray-50"
+                            }`}
+                          >
+                            <Plus className="w-4 h-4" />
+                            Add to class
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {activeTab === "settings" && (
+          <div className="flex-1 overflow-auto px-8 py-6 flex flex-col gap-6">
+            <div className="max-w-xl space-y-4">
+              <h2 className={`text-lg font-semibold ${
+                isDark ? "text-white" : "text-gray-900"
+              }`}>
+                Course Settings
+              </h2>
+              <div className="space-y-2">
+                <label
+                  className={`text-sm font-medium ${
+                    isDark ? "text-gray-300" : "text-gray-700"
+                  }`}
+                  htmlFor="courseName"
+                >
+                  Course name
+                  <span className="text-xs text-gray-500 ml-2">(max 30 chars)</span>
+                </label>
+                <input
+                  id="courseName"
+                  type="text"
+                  maxLength={30}
+                  value={courseNameInput}
+                  onChange={(e) => setCourseNameInput(e.target.value)}
+                  className={`w-full px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent ${
+                    isDark
+                      ? "border-gray-600 bg-gray-700 text-white"
+                      : "border-gray-300"
+                  }`}
+                />
+                <button
+                  onClick={handleUpdateCourse}
+                  className={`px-4 py-2 rounded-lg transition-colors text-sm ${
+                    isDark
+                      ? "bg-blue-600 text-white hover:bg-blue-700"
+                      : "bg-gray-900 text-white hover:bg-gray-800"
+                  }`}
+                >
+                  Save changes
+                </button>
+              </div>
+
+              <div className={`pt-4 border-t space-y-2 ${
+                isDark ? "border-gray-600" : "border-gray-200"
+              }`}>
+                <h3 className="text-sm font-semibold text-red-600">
+                  Danger zone
+                </h3>
+                <p className={`text-sm ${
+                  isDark ? "text-gray-400" : "text-gray-600"
+                }`}>
+                  Deleting this course will remove it permanently.
+                </p>
+                <button
+                  onClick={handleDeleteCourse}
+                  className={`px-4 py-2 border rounded-lg transition-colors text-sm ${
+                    isDark
+                      ? "border-red-600 text-red-400 hover:bg-red-900/30"
+                      : "border-red-300 text-red-700 hover:bg-red-50"
+                  }`}
+                >
+                  Delete course
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "chat" && (
+          <div className="flex-1 overflow-auto px-8 py-6 flex flex-col">
+            <div className="flex flex-col h-full gap-4">
+              <div className="flex items-center justify-between">
+                <h2 className={`text-lg font-medium ${
+                  isDark ? "text-white" : "text-gray-900"
+                }`}>
+                  Tutor Sessions
+                </h2>
+                <button
+                  onClick={handleCreateSession}
+                  className={`p-2 rounded-lg transition-all duration-200 group ${
+                    isDark
+                      ? "bg-blue-900/30 text-blue-400 hover:bg-blue-900/50 hover:text-blue-300"
+                      : "bg-blue-100 text-blue-600 hover:bg-blue-200 hover:text-blue-700"
+                  }`}
+                  disabled={isLoadingSessions}
+                  title="Create new session"
+                >
+                  <svg
+                    className="w-5 h-5 group-hover:rotate-90 transition-transform duration-300"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 4v16m8-8H4"
+                    />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="flex gap-3 overflow-x-auto pb-2">
+                {tutorSessions.length === 0 ? (
+                  <p
+                    className={`text-sm ${
+                      isDark ? "text-gray-400" : "text-gray-500"
+                    }`}
+                  >
+                    No sessions yet. Create one to start chatting.
+                  </p>
+                ) : (
+                  tutorSessions.map((session) => (
+                    <button
+                      key={session.id}
+                      onClick={() => handleSelectSession(session.id)}
+                      className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
+                        activeSessionId === session.id
+                          ? isDark
+                            ? "border-blue-600 bg-blue-600 text-white"
+                            : "border-gray-900 bg-gray-900 text-white"
+                          : isDark
+                          ? "border-gray-600 text-gray-300 bg-gray-700"
+                          : "border-gray-300 text-gray-800 bg-white"
+                      }`}
+                    >
+                      {session.title || `Session ${session.id}`}
+                    </button>
+                  ))
+                )}
+              </div>
+
+              <div className={`flex-1 overflow-y-auto space-y-4 border rounded-lg p-4 ${
+                isDark
+                  ? "bg-gray-700 border-gray-600"
+                  : "bg-white border-gray-200"
+              }`}>
+                {isLoadingSessions ? (
+                  <p
+                    className={`text-sm ${
+                      isDark ? "text-gray-400" : "text-gray-500"
+                    }`}
+                  >
+                    Loading sessions...
+                  </p>
+                ) : messages.length === 0 ? (
+                  <p
+                    className={`text-sm ${
+                      isDark ? "text-gray-400" : "text-gray-500"
+                    }`}
+                  >
+                    No messages yet. Ask a question to begin.
+                  </p>
+                ) : (
+                  messages.map((msg) => (
+                    <div
+                      key={msg.id}
+                      className={`flex ${
+                        msg.sender === "user" ? "justify-end" : "justify-start"
+                      }`}
+                    >
+                      <div
+                        className={`max-w-2xl px-4 py-2 rounded-lg ${
+                          msg.sender === "user"
+                            ? isDark
+                              ? "bg-blue-600 text-white"
+                              : "bg-gray-900 text-white"
+                            : isDark
+                            ? "bg-gray-600 text-gray-100"
+                            : "bg-gray-100 text-gray-900"
+                        }`}
+                      >
+                        <div
+                          className="prose prose-sm dark:prose-invert max-w-none"
+                          dangerouslySetInnerHTML={{
+                            __html: markdownToHtml(msg.content),
+                          }}
+                        />
+                        <p
+                          className={`text-[10px] opacity-70 mt-1 ${
+                            msg.sender === "user"
+                              ? "text-white/70"
+                              : isDark
+                              ? "text-gray-300/70"
+                              : "text-gray-600/70"
+                          }`}
+                        >
+                          {msg.timestamp}
+                        </p>
+                      </div>
+                    </div>
+                  ))
+                )}
+
+                {isWaitingForAi && (
+                  <div className="flex justify-start">
+                    <div className={`max-w-2xl px-4 py-2 rounded-lg ${
+                      isDark
+                        ? "bg-gray-600 text-gray-200"
+                        : "bg-gray-100 text-gray-900"
+                    }`}>
+                      <p className="text-sm flex items-center gap-2">
+                        <span
+                          className={`inline-flex h-2 w-2 rounded-full animate-ping ${
+                            isDark ? "bg-blue-400" : "bg-gray-500"
+                          }`}
+                        />
+                        AI is thinking...
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className={`border-t pt-4 ${
+                isDark ? "border-gray-600" : "border-gray-200"
+              }`}>
+                <p className="text-xs text-gray-500 mb-3">
+                  AI can make mistakes. Please verify important information.
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="Ask a question about your documents..."
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        handleSendMessage();
+                      }
+                    }}
+                    className={`flex-1 px-3 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm ${
+                      isDark
+                        ? "border-gray-600 bg-gray-700 text-white placeholder-gray-400"
+                        : "border-gray-300"
+                    }`}
+                  />
+                  <button
+                    onClick={handleSendMessage}
+                    disabled={!activeSessionId || isSending}
+                    className={`p-2 border rounded-lg transition-colors disabled:opacity-50 ${
+                      isDark
+                        ? "bg-gray-700 border-gray-600 text-gray-300 hover:bg-gray-600"
+                        : "bg-white border-gray-300 text-gray-600 hover:bg-gray-50"
+                    }`}
+                  >
+                    <Send className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

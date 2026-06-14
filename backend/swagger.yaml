@@ -1,0 +1,108 @@
+openapi: 3.0.3
+info:
+  title: AI Tutor Backend API
+  version: 1.0.0
+  description: REST API for the AI Tutor Assistant showcase.
+servers:
+  - url: http://localhost:3000
+    description: Local API
+paths:
+  /api/v1/user/register:
+    post:
+      summary: Register a user
+      tags:
+        - User
+      responses:
+        "200":
+          description: Registration response
+  /api/v1/user/login:
+    post:
+      summary: Log in
+      tags:
+        - User
+      responses:
+        "200":
+          description: Application token response
+  /api/v1/user/me:
+    get:
+      summary: Get current user
+      tags:
+        - User
+      responses:
+        "200":
+          description: Current user profile
+  /api/v1/courses/:
+    get:
+      summary: List courses
+      tags:
+        - Courses
+      responses:
+        "200":
+          description: Course list
+    post:
+      summary: Create course
+      tags:
+        - Courses
+      responses:
+        "200":
+          description: Created course
+  /api/v1/files/:
+    get:
+      summary: List files
+      tags:
+        - Files
+      responses:
+        "200":
+          description: File list
+    post:
+      summary: Create file reference
+      tags:
+        - Files
+      responses:
+        "200":
+          description: Created file reference
+  /api/v1/tutor-session/chat:
+    post:
+      summary: Create tutor session
+      tags:
+        - Tutor Sessions
+      responses:
+        "200":
+          description: Created tutor session
+  /api/v1/chat-messages/:
+    get:
+      summary: List chat messages
+      tags:
+        - Chat Messages
+      responses:
+        "200":
+          description: Chat message list
+    post:
+      summary: Create chat message
+      tags:
+        - Chat Messages
+      responses:
+        "200":
+          description: Assistant response
+  /api/v1/drive/search/:
+    get:
+      summary: Search connected files
+      tags:
+        - Drive
+      responses:
+        "200":
+          description: Search results
+  /api/v1/video/generate:
+    post:
+      summary: Generate video
+      tags:
+        - Video
+      responses:
+        "200":
+          description: Generated video metadata
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
