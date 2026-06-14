@@ -14,7 +14,11 @@ export default function Home() {
         isDark ? "bg-gray-800 text-white" : "bg-background"
       }`}
     >
-      <header className="sticky top-0 z-10 w-full border-b bg-background/95 backdrop-blur">
+      <header
+        className={`sticky top-0 z-10 w-full border-b backdrop-blur ${
+          isDark ? "bg-gray-900/95 border-gray-700" : "bg-background/95"
+        }`}
+      >
         <div className="w-full flex h-16 items-center justify-between py-4">
           <div className="flex items-center gap-1 font-bold text-xl">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
@@ -46,7 +50,11 @@ export default function Home() {
       <main className="flex-1 mt-10 px-4  py-8">
         <section className="space-y-6 pb-8 pt-6 md:pt-10 md:pb-12">
           <div className="container flex mx-auto flex-col items-center gap-4 mt-10">
-            <div className="rounded-2xl bg-muted px-4 py-1.5 text-sm font-medium">
+            <div
+              className={`rounded-2xl px-4 py-1.5 text-sm font-medium ${
+                isDark ? "bg-gray-700 text-gray-200" : "bg-muted"
+              }`}
+            >
               Powered by Google Drive MCP
             </div>
           </div>

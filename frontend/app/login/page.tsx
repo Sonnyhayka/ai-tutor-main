@@ -37,7 +37,11 @@ const Page = () => {
         isDark ? "bg-gray-800 text-white" : "bg-background"
       }`}
     >
-      <header className="sticky top-0 z-10 w-full border-b bg-background/95 backdrop-blur">
+      <header
+        className={`sticky top-0 z-10 w-full border-b backdrop-blur ${
+          isDark ? "bg-gray-900/95 border-gray-700" : "bg-background/95"
+        }`}
+      >
         <div className="w-full flex h-16 items-center justify-between py-4">
           <div
             className="flex items-center gap-1 font-bold text-xl hover:cursor-pointer"
@@ -169,7 +173,9 @@ const Page = () => {
               Don&apos;t have an account?{" "}
               <a
                 href="/signup"
-                className="text-primary font-semibold hover:underline"
+                className={`font-semibold hover:underline ${
+                  isDark ? "text-blue-400" : "text-primary"
+                }`}
               >
                 Sign up
               </a>
