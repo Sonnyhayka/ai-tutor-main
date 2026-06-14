@@ -19,7 +19,7 @@ npm run dev -- -p 5173
 Open http://localhost:5173 in a browser.
 
 ## Environment Variables
-
+# Use this for mock up purpose if needed
 ```env
 NEXT_PUBLIC_API_URL=
 ```
